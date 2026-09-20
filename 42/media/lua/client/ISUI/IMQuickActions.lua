@@ -4,6 +4,13 @@ require "TimedActions/ISReadWorldMap"
 require "TimedActions/ISBaseTimedAction" 
 require "TimedActions/ISUnequipAction"
 require "TimedActions/ISWearClothing"
+require "TimedActions/ISInventoryTransferAction"
+
+function addCustomBind() 
+    table.insert(keyBinding, { value = "IMQAOpenMaskMenu", key = Keyboard.KEY_TAB })
+end
+
+Events.OnGameBoot.Add(addCustomBind)
 
 IMQA = {}
 
@@ -48,11 +55,7 @@ local y
 local _uiByPID = {}
 local SYMBOL_SCALE = 0.4
 
-function addCustomBind() 
-    table.insert(keyBinding, { value = "[myClothesMen]", key = Keyboard.KEY_Z })
-end
 
-Events.OnGameStart.Add(addCustomBind)
 
 
 IMQARadialMenu = ISRadialMenu:derive("IMQARadialMenu")
@@ -85,7 +88,7 @@ function IMQARadialMenu:fillMenu()
         end, playerObj)
     else 
         if isHasMask(inv) then 
-            self:addSlice("Equip a mask", getTexture("media/ui/LootableMaps/map_x.png"), 
+            self:addSlice("Equip a " .. foundMask.name, getTexture("media/ui/LootableMaps/map_x.png"), 
             function() 
                 IMQARadialMenu:equipMask(playerObj, inv)
             end, playerObj)
@@ -100,31 +103,26 @@ end
 
 function IMQARadialMenu:equipMask(playerObj, inv)
     DebugLog.log("IMQARadialMenu:equipMask Found mask: " .. foundMask.name .. " id: " .. foundMask.id)
-    ISTimedActionQueue.add(ISWearClothing:new(playerObj, inv:getFirstTypeRecurse(foundMask.id)))
+
+    local item = inv:getFirstTypeRecurse(foundMask.id)
+    if item then
+        local itemContainer = item:getContainer() -- контейнер, в котором предмет реально лежит
+
+        if itemContainer and itemContainer ~= inv then
+            -- предмет вложен в сумку — сначала перекладываем его в основной инвентарь
+            ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, item, itemContainer, inv))
+        end
+
+        ISTimedActionQueue.add(ISWearClothing:new(playerObj, item))
+    end
+
     foundMask = {name = nil, id = nil}
-    return false
 end
 
 function IMQARadialMenu:takeOffMask(playerObj, inv)
-    local mask = playerObj:getWornItem(ItemBodyLocation.MASK)
-    local maskEyes = playerObj:getWornItem(ItemBodyLocation.MASK_EYES)
-    local maskHat = playerObj:getWornItem(ItemBodyLocation.FULL_HAT)
-
-    local queue = ISTimedActionQueue.getTimedActionQueue(character)
-
-    if isProtectiveMask(mask) then 
-        ISTimedActionQueue.add(ISUnequipAction:new(playerObj, mask, ENEQUIP_TIME, "remove"))
-        return true 
-    end
-    if isProtectiveMask(maskEyes) then 
-        ISTimedActionQueue.add(ISUnequipAction:new(playerObj, maskEyes, ENEQUIP_TIME, "remove"))
-        return true 
-    end
-    if isProtectiveMask(maskHat) then 
-        ISTimedActionQueue.add(ISUnequipAction:new(playerObj, maskHat, ENEQUIP_TIME, "remove"))
-        return true 
-    end 
-
+    DebugLog.log("IMQARadialMenu:takeOffMask Found mask: " .. foundMask.name .. " id: " .. foundMask.id)
+    ISTimedActionQueue.add(ISUnequipAction:new(playerObj, inv:getFirstTypeRecurse(foundMask.id), ENEQUIP_TIME, "remove"))
+    foundMask = {name = nil, id = nil}
 end 
 
 function getCharacterInventory(playerObj)
@@ -135,12 +133,13 @@ end
 
 function isWoreMask(player)
     local mask = player:getWornItem(ItemBodyLocation.MASK)
-    local maskEyes = player:getWornItem(ItemBodyLocation.MASK_EYES)
-    local maskHat = player:getWornItem(ItemBodyLocation.FULL_HAT)
+    if isProtectiveMask(mask) then foundMask = {name = mask:getName(), id = mask:getFullType()} return true end
 
-    if isProtectiveMask(mask) then return true end
-    if isProtectiveMask(maskEyes) then return true end
-    if isProtectiveMask(maskHat) then return true end 
+    local maskEyes = player:getWornItem(ItemBodyLocation.MASK_EYES)
+    if isProtectiveMask(maskEyes) then foundMask = {name = maskEyes:getName(), id = maskEyes:getFullType()} return true end
+
+    local maskHat = player:getWornItem(ItemBodyLocation.FULL_HAT)
+    if isProtectiveMask(maskHat) then foundMask = {name = maskHat:getName(), id = maskHat:getFullType()} return true end
 
     return false
 end
@@ -154,31 +153,54 @@ function isProtectiveMask(item)
 end
 
 function isHasMask(inv) 
-    local hasMask = false
     for _, data in ipairs(masksTypes) do
-        hasMask = inv:containsTypeRecurse(data.id)
-        if hasMask then foundMask = {name = data.name, id = data.id} break end
+        if inv:containsType(data.id) then 
+            foundMask = {name = data.name, id = data.id} 
+            return true 
+        end
     end
-    return hasMask
+    for _, data in ipairs(masksTypes) do
+        if inv:containsTypeRecurse(data.id) then 
+            foundMask = {name = data.name, id = data.id} 
+            return true 
+        end
+    end
+    return false
 end
 
-function IMQARadialMenu.onKeyPressed(key)
-    if key == Keyboard.KEY_Z then
-        if isGamePaused() then return end
+local HOLD_THRESHOLD = 300 -- мс, сколько нужно удерживать клавишу
+local keyHeldSince = nil
+local menuOpenedByHold = false
 
-        local player = getSpecificPlayer(0)
-        if not player or player:isDead() then return end
-
-        if radialMenu == nil then 
-            radialMenu = IMQARadialMenu:new(player)
-        end 
-
-        if radialMenu:isReallyVisible() then 
-            radialMenu:undisplay()
-        else
-            radialMenu:fillMenu()
+local function checkKeyHold()
+    if isKeyDown(getCore():getKey("IMQAOpenMaskMenu")) then
+        if keyHeldSince == nil then
+            keyHeldSince = getTimestampMs()
+        elseif not menuOpenedByHold and (getTimestampMs() - keyHeldSince) >= HOLD_THRESHOLD then
+            -- порог удержания достигнут - открываем радиальное меню
+            local player = getSpecificPlayer(0)
+            if player and not player:isDead() and not isGamePaused() then
+                if radialMenu == nil then
+                    radialMenu = IMQARadialMenu:new(player)
+                end
+                if not radialMenu:isReallyVisible() then
+                    radialMenu:fillMenu()
+                end
+                menuOpenedByHold = true
+            end
+        end
+    else
+        -- клавиша отпущена - сброс
+        keyHeldSince = nil
+        if menuOpenedByHold then
+            menuOpenedByHold = false
+            -- опционально: закрыть меню при отпускании клавиши,
+            -- как это работает в ванильных меню (hold R / hold F)
+            if radialMenu ~= nil and radialMenu:isReallyVisible() then
+                radialMenu:undisplay()
+            end
         end
     end
 end
 
-Events.OnKeyPressed.Add(IMQARadialMenu.onKeyPressed)
+Events.OnTick.Add(checkKeyHold)
