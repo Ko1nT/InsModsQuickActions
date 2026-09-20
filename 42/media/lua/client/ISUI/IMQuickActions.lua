@@ -14,6 +14,18 @@ Events.OnGameBoot.Add(addCustomBind)
 
 IMQA = {}
 
+textures = {
+    maskEquip = getTexture("media/ui/QuickActions/map_mgasmask.png"),
+    maskUnequip = getTexture("media/ui/QuickActions/map_mgasmask.png"),
+    changeFilter = getTexture("media/ui/LootableMaps/map_x.png"),
+    topClothesEquip = getTexture("media/ui/LootableMaps/map_x.png"),
+    topClothesUnequip = getTexture("media/ui/LootableMaps/map_x.png"),
+    armorEquip = getTexture("media/ui/LootableMaps/map_x.png"),
+    armorUnequip = getTexture("media/ui/LootableMaps/map_x.png"),
+    bagsEquip = getTexture("media/ui/LootableMaps/map_x.png"),
+    bagsUnequip = getTexture("media/ui/LootableMaps/map_x.png")
+}
+
 masksTypes = {
     {name = "NBC Mask", id = "Base.Hat_NBCmask"},
     {name = "Gas Mask", id = "Base.Hat_GasMask"},
@@ -30,10 +42,12 @@ masksTypes = {
     {name = "Respirator (NF)", id = "Base.Hat_BuildersRespirator_nofilter"},
     {name = "Improvised Gas Mask (NF)", id = "Base.Hat_ImprovisedGasMask_nofilter"}
 }
+
+
 LOCATION_MASK = "Mask"
 LOCATION_MASKEYES = "MaskEyes"
 LOCATION_MASK_FULLHAT = "FullHat"
-ENEQUIP_TIME = 30
+UNEQUIP_TIME = 30
 EQUIP_TIME = 60
 masksLocation = {
     {name = "mask", location = "Mask"},
@@ -71,6 +85,24 @@ function IMQARadialMenu:new(player)
     return o
 end
 
+local function isHasFilters(inv, maskType)
+    if maskType == "Base.Hat_GasMask" or maskType == "Base.Hat_GasMask_nofilter" then
+        for _, filterType in ipairs(masksGasFilters) do
+            if inv:containsType(filterType) then
+                return true
+            end
+        end
+    elseif maskType == "Base.Hat_BuildersRespirator" or maskType == "Base.Hat_BuildersRespirator_nofilter" then
+        for _, filterType in ipairs(maskRespiratorFilters) do
+            if inv:containsType(filterType) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+
 function IMQARadialMenu:fillMenu()
     -- local fullPath = "media/ui/LootableMaps/" .. data.tid .. ".png"
     local playerNum = 0
@@ -82,13 +114,26 @@ function IMQARadialMenu:fillMenu()
     if not inv then return false end
 
     if isWoreMask(playerObj) then 
-        self:addSlice("Take off mask", getTexture("media/ui/LootableMaps/map_x.png"), 
+        self:addSlice("Take off mask", textures.maskUnequip, 
         function()
             IMQARadialMenu:takeOffMask(playerObj, inv)
         end, playerObj)
+
+        if isHasFilters(inv, foundMask.id) and foundMask.id == "Base.Hat_GasMask" or foundMask.id == "Base.Hat_GasMask_nofilter" then 
+            self:addSlice("Change filter", textures.changeFilter, 
+            function() 
+                IMQARadialMenu:changeFilterGasMask(playerObj, inv)
+            end, playerObj)
+        end
+        if isHasFilters(inv, foundMask.id) and foundMask.id == "Base.Hat_BuildersRespirator" or foundMask.id == "Base.Hat_BuildersRespirator_nofilter" then 
+            self:addSlice("Change filter", textures.changeFilter, 
+            function() 
+                IMQARadialMenu:changeFilterRespirator(playerObj, inv)
+            end, playerObj)
+        end
     else 
         if isHasMask(inv) then 
-            self:addSlice("Equip a " .. foundMask.name, getTexture("media/ui/LootableMaps/map_x.png"), 
+            self:addSlice("Equip a " .. foundMask.name, textures.maskEquip, 
             function() 
                 IMQARadialMenu:equipMask(playerObj, inv)
             end, playerObj)
@@ -121,9 +166,84 @@ end
 
 function IMQARadialMenu:takeOffMask(playerObj, inv)
     DebugLog.log("IMQARadialMenu:takeOffMask Found mask: " .. foundMask.name .. " id: " .. foundMask.id)
-    ISTimedActionQueue.add(ISUnequipAction:new(playerObj, inv:getFirstTypeRecurse(foundMask.id), ENEQUIP_TIME, "remove"))
+    ISTimedActionQueue.add(ISUnequipAction:new(playerObj, inv:getFirstTypeRecurse(foundMask.id), UNEQUIP_TIME, "remove"))
     foundMask = {name = nil, id = nil}
 end 
+
+local removeFilterRespiratorRecipe = "RemoveRespiratorFilters"
+local putFilterRespiratorRecipe = "PutFiltersOnRespirator"
+local putFilterGasMaskRecipe = "PutFilterOnGasMask"
+local removeFilterGasMaskRecipe = "RemoveGasMaskFilter"
+
+local function doGasMaskFilterRecipe(playerObj, maskItem, recipeName, onComplete)
+    local recipe = getScriptManager():getCraftRecipe(recipeName)
+    if not recipe then
+        DebugLog.log("Recipe not found: " .. tostring(recipeName))
+        return false
+    end
+
+    local containers = ISInventoryPaneContextMenu.getContainers(playerObj)
+    local logic = HandcraftLogic.new(playerObj, nil, nil)
+    logic:setContainers(containers)
+    logic:setRecipeFromContextClick(recipe, maskItem)
+
+    if not logic:canPerformCurrentRecipe() then
+        DebugLog.log("Cannot perform recipe: " .. recipeName)
+        return false
+    end
+
+    local action = ISEntityUI.HandcraftStart(playerObj, logic, false, true, nil)
+    if action and onComplete then
+        action:setOnComplete(onComplete)
+    end
+    return action ~= nil
+end
+
+function IMQARadialMenu:changeFilterRespirator(playerObj, inv)
+    DebugLog.log("IMQARadialMenu:changeFilter Found mask: " .. foundMask.name .. " id: " .. foundMask.id)
+
+    local maskItem = inv:getFirstTypeRecurse(foundMask.id)
+    if not maskItem then return end
+
+    local filterItem = nil
+
+    if not filterItem then
+        for _, filterType in ipairs(maskRespiratorFilters) do
+            filterItem = inv:getFirstTypeRecurse(filterType)
+            if filterItem then break end
+        end
+    end
+
+    if not filterItem then return end
+
+    ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, filterItem, filterItem:getContainer(), inv))
+
+    doGasMaskFilterRecipe(playerObj, maskItem, removeFilterRespiratorRecipe, function()
+        doGasMaskFilterRecipe(playerObj, maskItem, putFilterRespiratorRecipe)
+    end)
+end
+
+function IMQARadialMenu:changeFilterGasMask(playerObj, inv)
+    DebugLog.log("IMQARadialMenu:changeFilter Found mask: " .. foundMask.name .. " id: " .. foundMask.id)
+
+    local maskItem = inv:getFirstTypeRecurse(foundMask.id)
+    if not maskItem then return end
+
+    local filterItem = nil
+    for _, filterType in ipairs(masksGasFilters) do
+        filterItem = inv:getFirstTypeRecurse(filterType)
+        if filterItem then break end
+    end
+
+    if not filterItem then return end
+
+    ISTimedActionQueue.add(ISInventoryTransferAction:new(playerObj, filterItem, filterItem:getContainer(), inv))
+
+    doGasMaskFilterRecipe(playerObj, maskItem, removeFilterGasMaskRecipe, function() 
+        doGasMaskFilterRecipe(playerObj, maskItem, putFilterGasMaskRecipe) 
+    end)
+end
+
 
 function getCharacterInventory(playerObj)
     local inv = playerObj:getInventory() or nil
